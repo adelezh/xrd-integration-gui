@@ -1,0 +1,8 @@
+.vendor/
+.venv/
+__pycache__/
+.pytest_cache/
+.test-output/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
