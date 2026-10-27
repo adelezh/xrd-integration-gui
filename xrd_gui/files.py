@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 from dataclasses import dataclass, field
 import json, os, tempfile, shutil
 import numpy as np
@@ -44,6 +44,8 @@ def read_curve(path):
     return Curve(a[:,0],a[:,1],a[:,2] if a.shape[1]==3 else None,meta)
 
 def validate_sigma(curve):
+    if curve.metadata.get('xye_supported') is False:
+        raise ValueError(curve.metadata.get('xye_reason','This result has no supported uncertainty for XYE. Choose XY/CHI.'))
     if curve.sigma is None: raise ValueError('XYE needs uncertainties. Select a pyFAI error model or supply variance; conversion offers an explicit approximation.')
     good = np.isfinite(curve.sigma) & (curve.sigma > 0) & np.isfinite(curve.intensity) & np.isfinite(curve.x)
     if not good.all(): raise ValueError(f'XYE contains {np.count_nonzero(~good)} invalid/empty bins. Reduce bins or restrict radial range; no fabricated uncertainties will be written.')
@@ -92,6 +94,21 @@ def atomic_write(path, writer, overwrite=False):
 
 def write_curve(path, c, headerless=False, overwrite=False):
     path = Path(path); ext = path.suffix.lower()
+    # Omit undefined integration bins without changing the in-memory result or grid.
+    valid = np.isfinite(c.x) & np.isfinite(c.intensity)
+    valid[np.asarray(c.metadata.get('invalid_bins', []), dtype=int)] = False
+    omitted = np.flatnonzero(~valid)
+    if not valid.any():
+        raise ValueError('No finite populated bins to export. Adjust the range, mask, or bin count.')
+    if omitted.size:
+        meta = dict(c.metadata)
+        meta['export_omitted_bins'] = omitted.tolist()
+        meta['export_original_bin_count'] = len(c.x)
+        meta['export_retained_bin_indices'] = np.flatnonzero(valid).tolist()
+        meta['export_bin_policy'] = 'Undefined bins omitted; original coordinates retained; no interpolation or zero substitution.'
+        meta['integration_invalid_bins'] = list(c.metadata.get('invalid_bins', []))
+        meta['invalid_bins'] = []  # Exported rows are populated; old indices refer to the original grid.
+        c = Curve(c.x[valid], c.intensity[valid], None if c.sigma is None else c.sigma[valid], meta)
     if ext == '.xye': validate_sigma(c)
     data = np.column_stack((c.x,c.intensity,c.sigma)) if ext == '.xye' else np.column_stack((c.x,c.intensity))
     header = ''
@@ -99,6 +116,7 @@ def write_curve(path, c, headerless=False, overwrite=False):
         header = f"{path.stem}\n{c.metadata.get('unit','unknown')}\nIntensity\n{len(c.x)}"
     atomic_write(path, lambda p: np.savetxt(p,data,fmt='%.12g',header=header,comments=''),overwrite)
     atomic_write(str(path)+'.json',lambda p:p.write_text(json.dumps(c.metadata,indent=2,default=str)),overwrite)
+    return int(omitted.size)
 
 def write_map(path, result, metadata, overwrite=False):
     payload = dict(intensity=result.intensity,radial=result.radial,azimuth=result.azimuthal,metadata=json.dumps(metadata,default=str))

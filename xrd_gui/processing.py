@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 import hashlib
 import copy
@@ -44,30 +44,47 @@ class Engine:
                 mask |= source != 0
         return mask
     def freeze_variance(self, settings):
-        if settings.error_model == 'supplied':
+        if settings.error_model == 'supplied' or (settings.method_1d == 'sigma_clip' and settings.clipping_model == 'supplied'):
             self.variance_cache[settings.variance] = read_image(settings.variance).copy()
             self.metadata['variance_sha256'] = hashlib.sha256(Path(settings.variance).read_bytes()).hexdigest()
 
     def chi(self, shape): return np.degrees(self.ai.center_array(shape, unit='chi_rad'))
     def integrate(self, image, settings, source='', one=True, two=True):
-        s = settings.validate()
+        s = (settings if one else replace(settings,method_1d='average',compare_average=False)).validate()
         if s.unit == 'q_A^-1' and not self.ai.wavelength: raise ValueError('q integration needs a wavelength in the calibration.')
         base = self.base_mask(image); mask = base.copy()
         if s.sector: mask |= ~sector_pixels(self.chi(image.shape),s.start,s.end)
         variance = None
-        if s.error_model == 'supplied':
+        if s.error_model == 'supplied' or (one and s.method_1d == 'sigma_clip' and s.clipping_model == 'supplied'):
             variance = self.variance_cache.get(s.variance)
             if variance is None: variance = read_image(s.variance)
             if variance.shape != image.shape or not np.isfinite(variance).all() or (variance < 0).any(): raise ValueError('Variance must match the image and contain finite nonnegative variances.')
-        kw = dict(unit=s.unit,radial_range=s.radial_range,correctSolidAngle=s.solid_angle,polarization_factor=s.polarization,method=('no','histogram','cython'),variance=variance,error_model='poisson' if s.error_model=='poisson' else None)
-        meta = dict(self.metadata,source=str(source),settings=asdict(s),unit=s.unit,uncertainty='propagated supplied variance' if variance is not None else ('pyFAI Poisson model estimate; corrected intensity cannot recover true counting variance' if s.error_model=='poisson' else 'none'),dark_subtraction='none')
+        kw = dict(unit=s.unit,radial_range=s.radial_range,correctSolidAngle=s.solid_angle,polarization_factor=s.polarization,method=('no','histogram','cython'),variance=variance if s.error_model=='supplied' else None,error_model='poisson' if s.error_model=='poisson' else None)
+        meta = dict(self.metadata,method_1d='average',api='integrate1d_ng',source=str(source),settings=asdict(s),unit=s.unit,uncertainty='propagated supplied variance' if s.error_model=='supplied' else ('pyFAI Poisson model estimate; corrected intensity cannot recover true counting variance' if s.error_model=='poisson' else 'none'),dark_subtraction='none')
         curves = []
-        if one:
+        if one and s.method_1d == 'average':
             r = self.ai.integrate1d_ng(image,s.radial_bins,mask=mask,**kw)
-            curves.append(Curve(r.radial,r.intensity,r.sigma,dict(meta,selection='sector' if s.sector else 'full')))
+            curves.append(Curve(r.radial,r.intensity,r.sigma,dict(meta,selection='sector' if s.sector else 'full',comparison=False,invalid_bins=np.flatnonzero(np.asarray(r.count)<=0).tolist())))
             if s.sector and s.compare_full:
                 r = self.ai.integrate1d_ng(image,s.radial_bins,mask=base,**kw)
-                curves.append(Curve(r.radial,r.intensity,r.sigma,dict(meta,selection='full comparison')))
+                curves.append(Curve(r.radial,r.intensity,r.sigma,dict(meta,selection='full comparison',comparison=True,invalid_bins=np.flatnonzero(np.asarray(r.count)<=0).tolist())))
+        elif one:
+            from .estimators import robust_curve
+            if np.all(mask):raise ValueError('No valid pixels in the selected sector after masking.')
+            radial_range=s.radial_range
+            if radial_range is None:
+                coordinates=self.ai.center_array(image.shape,unit=s.unit)
+                available=coordinates[(~base) & np.isfinite(coordinates)]
+                radial_range=(float(available.min()),float(available.max()))
+            if radial_range[0]>=radial_range[1]:raise ValueError('Insufficient radial extent for integration.')
+            selection='sector' if s.sector else 'full'
+            curves.append(robust_curve(self.ai,image,s,mask,variance,radial_range,meta,selection))
+            if s.compare_average:
+                curves.append(robust_curve(self.ai,image,s,mask,variance,radial_range,meta,selection,method='average',reference=True))
+            if s.sector and s.compare_full:
+                curves.append(robust_curve(self.ai,image,s,base,variance,radial_range,meta,'full comparison',reference=True))
+        # Map metadata records its actual ordinary estimator, not the selected 1D estimator.
+        meta=dict(meta,method_1d='average',api='integrate2d_ng',settings=dict(meta['settings'],method_1d='average'))
         # 2D retains the full azimuth axis; excluded sector pixels remain empty.
         map_result = self.ai.integrate2d_ng(image,s.radial_bins,s.azimuth_bins,mask=mask,azimuth_range=(-180,180),**kw) if two else None
         return curves,map_result,meta

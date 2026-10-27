@@ -54,8 +54,9 @@ class JobsMixin:
         for var in list(self.bvars.values())+[self.bone,self.btwo,self.btth,self.bq]:var.trace_add('write',lambda *_:self.live_preview('batch'))
         self.live_preview('batch')
     def capture_batch(self):
-        self.batch_settings=self.settings();s=self.batch_settings
-        self.batch_summary.set(f'{s.radial_bins:,} radial bins · {s.azimuth_bins} azimuth bins\n'+(f'Sector {s.start:g}°–{s.end:g}°' if s.sector else 'Full azimuth')+f' · {s.error_model} uncertainty')
+        self.batch_settings=self.settings(); self.persist_methods();s=self.batch_settings
+        from .presentation import method_label
+        self.batch_summary.set(method_label(s.__dict__)+(f' | clipping model: {s.clipping_model}, max iterations: {s.sigma_iterations}' if s.method_1d=='sigma_clip' else '')+'\n'+f'{s.radial_bins:,} radial bins · {s.azimuth_bins} azimuth bins\n'+(f'Sector {s.start:g}°–{s.end:g}°' if s.sector else 'Full azimuth')+f' · {s.error_model} uncertainty')
         self.live_preview('batch')
     def job_inputs(self,prefix):
         types=[('TIFF images','*.tif *.tiff')] if prefix=='batch' else [('Detector / curves','*.tif *.tiff *.xy *.chi *.xye')]
@@ -210,7 +211,7 @@ class JobsMixin:
                             values=list(table.tree.item(iid,'values'));values[-1]=text;table.tree.item(iid,values=values);table.tree.see(iid);table.paths[iid]+=' | '+text
                 elif kind=='done':
                     self.finish_job_ui();self.guard(lambda:self.done(payload))
-                    if self.active_job=='integration':self.result_status.set('Results need updating' if 'updat' in self.status.get().lower() and 'complete' not in self.status.get().lower() else ('Cancelled' if self.cancel.is_set() else 'Results ready'))
+                    if self.active_job=='integration':self.refresh_result_status()
                 else:self.finish_job_ui();self.error(*payload)
         except queue.Empty:pass
         self.after(100,self.poll)

@@ -54,3 +54,22 @@ def group_files(paths, mode='All selected', section=''):
             d = parse(p); key = d['sample'] + ('_'+d['stamp'] if mode == 'Sample + timestamp' else '')
         groups[key].append(str(p))
     return dict(groups)
+
+
+def method_tag(settings):
+    """Exact decimal encoding, before the final unit suffix."""
+    from decimal import Decimal
+    def number(value):return format(Decimal(str(float(value))).normalize(),'f').replace('.','p')
+    if settings.method_1d=='sigma_clip':
+        return f'sigclip_s{number(settings.sigma_threshold)}_i{settings.sigma_iterations}_{settings.clipping_model}'
+    if settings.method_1d=='percentile':return f'pct{number(settings.percentile_low)}-{number(settings.percentile_high)}'
+    return ''
+
+def add_method_tag(name,settings):
+    tag=method_tag(settings)
+    if not tag:return name
+    p=Path(name);stem=p.stem
+    if stem.endswith(('_tth','_q')):
+        stem,unit=stem.rsplit('_',1)
+        return f'{stem}_{tag}_{unit}{p.suffix}'
+    return f'{stem}_{tag}{p.suffix}'

@@ -80,8 +80,8 @@ class LayoutMixin:
         self.sector=tk.BooleanVar();self.solid=tk.BooleanVar(value=True);self.compare=tk.BooleanVar();self.show_mask=tk.BooleanVar(value=True)
         self.settings_summary=tk.StringVar(value='2\u03b8 (\u00b0) | 5,000 bins | Full azimuth')
         self.settings_fold=Fold(tab,'Integration settings',opened=False,summary=self.settings_summary);self.settings_fold.pack(fill='x',padx=12)
-        scroll=ScrollPanel(self.settings_fold.body,height=180);scroll.pack(fill='x')
-        body=scroll.body;body.columnconfigure(0,weight=1);body.columnconfigure(1,weight=1)
+        scroll=ScrollPanel(self.settings_fold.body,height=260);self.settings_scroll=scroll;scroll.pack(fill='x')
+        body=scroll.body;body.columnconfigure(0,weight=1,uniform='settings');body.columnconfigure(1,weight=1,uniform='settings')
         basic=Form(body,'Basic integration');basic.grid(row=0,column=0,sticky='nsew',padx=(0,8))
         self.unit_display=tk.StringVar(value=UNIT_LABELS['2th_deg']);basic.field('Radial unit',self.unit_display,list(UNIT_LABELS.values()))
         self.unit_display.trace_add('write',lambda *_:self.svars['unit'].set(next(k for k,v in UNIT_LABELS.items() if v==self.unit_display.get())))
@@ -97,11 +97,12 @@ class LayoutMixin:
         adv=Fold(body,'Advanced settings',opened=False);adv.grid(row=1,column=0,columnspan=2,sticky='ew',pady=(8,0));self.advanced_fold=adv
         adv.body.columnconfigure(0,weight=1);adv.body.columnconfigure(1,weight=1)
         corrections=Form(adv.body,'Corrections');corrections.grid(row=0,column=0,sticky='nsew',padx=(0,8))
-        corrections.field('Azimuth bins',self.svars['azimuth_bins']);corrections.check('Solid-angle correction',self.solid);corrections.field('Polarization',self.svars['polarization'])
-        error=Form(adv.body,'Uncertainties');error.grid(row=0,column=1,sticky='nsew')
+        corrections.field('2D azimuth bins',self.svars['azimuth_bins']);corrections.check('Solid-angle correction',self.solid);corrections.field('Polarization',self.svars['polarization'])
+        error=Form(adv.body,'Average / percentile / 2D uncertainty');error.grid(row=0,column=1,sticky='nsew')
         self.error_display=tk.StringVar(value='None');error.field('Model',self.error_display,['None','Poisson estimate','Supplied variance'])
         self.error_display.trace_add('write',lambda *_:self.svars['error_model'].set({'None':'none','Poisson estimate':'poisson','Supplied variance':'supplied'}[self.error_display.get()]))
         self.variance_control=error.field('Variance image',self.svars['variance']);self.variance_browse=error.add(ttk.Button(error,text='Browse variance…',command=lambda:self.guard(self.browse_variance)))
+        self.build_methods(basic,adv.body)
         self.integration_actions=ActionBar(tab,'Run Both',lambda:self.guard(lambda:self.run_integration(True,True)),self.cancel.set);self.integration_actions.pack(fill='x')
         # Secondary actions are grouped next to the primary action.
         for text,one,two in [('Run 1D',True,False),('Run 2D',False,True)]:
@@ -114,13 +115,15 @@ class LayoutMixin:
         self.build_file_panel(self.files_panel)
         self.build_plots(self.plot_panes)
         self.register_panes('diagnostic',self.plot_panes,[.22,.63]);self.register_panes('plots_vertical',self.right_plots,[.5],vertical=True)
-        for var in list(self.svars.values())+[self.sector,self.solid,self.compare]:var.trace_add('write',self.dirty)
+        for key,var in self.svars.items():var.trace_add('write',lambda *_,k=key:self.dirty(one=k!='azimuth_bins'))
+        for var in (self.sector,self.solid):var.trace_add('write',self.dirty)
+        self.compare.trace_add('write',lambda *_:self.dirty(two=False))
         for var in [self.svars['start'],self.svars['end'],self.sector]:var.trace_add('write',lambda *_:self.overlay_update())
         self.sector.trace_add('write',lambda *_:self.update_setting_states());self.svars['error_model'].trace_add('write',lambda *_:self.update_setting_states());self.update_setting_states()
 
     def update_setting_states(self):
         for widget in (self.angle_start,self.angle_end,self.compare_control):widget.configure(state='normal' if self.sector.get() else 'disabled')
-        for widget in (self.variance_control,self.variance_browse):widget.configure(state='normal' if self.svars['error_model'].get()=='supplied' else 'disabled')
+        for widget in (self.variance_control,self.variance_browse):widget.configure(state='normal' if self.svars['error_model'].get()=='supplied' or (hasattr(self,'method_vars') and self.method_vars['method_1d'].get()=='sigma_clip' and self.method_vars['clipping_model'].get()=='supplied') else 'disabled')
     def build_file_panel(self,parent):
         row=ttk.Frame(parent);row.pack(fill='x',pady=(0,6))
         self.button(row,'Add files',self.add_files);self.button(row,'Add folder',self.add_folder)

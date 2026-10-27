@@ -15,12 +15,14 @@ steps=[];wait_start=None
 def setup():
     app.poni.set(str(base/'CeO2_2_poni.poni'));app.mask.set(str(base/'CeO2_2.npy'));app.load_engine();app.cal_fold.set_open(False)
     app.files=[str(source)];app.refresh_files();app.navigate(1);app.svars['radial_bins'].set('120');app.svars['azimuth_bins'].set('36')
+    # The real detector has masked empty edge bins; export a populated range.
+    app.svars['minimum'].set('1');app.svars['maximum'].set('10')
     app.run_integration(True,True);assert app.busy
 
 def diagnostic_finished():
     assert app.curves and app.map_result is not None
-    assert app.result_status.get()=='Results ready'
-    app.svars['radial_bins'].set('121');assert app.result_status.get()=='Results need updating'
+    assert app.result_status.get()=='1D ready | 2D ready'
+    app.svars['radial_bins'].set('121');assert app.result_status.get()=='1D outdated | 2D outdated'
     app.tabs.select(1);app.batch_files=[str(source)];app.bvars['folder'].set(str(out/'batch'));app.bvars['policy'].set('Unique name');app.capture_batch()
     assert app.batch_settings.radial_bins==121
     app.start_batch();assert app.busy

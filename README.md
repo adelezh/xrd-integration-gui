@@ -104,3 +104,8 @@ The application now evaluates pyFAI center-coordinate unit equations with NumPy,
 ## Refined interface
 
 See [UI_REFINEMENT.md](UI_REFINEMENT.md) for the current layout and display controls. Integration settings now start collapsed, Clear is in the Workspace menu, and 2D display controls are accessed through the map's Display button. Batch and manipulation settings scroll independently of their preview tables. Scientific processing and numerical exports retain the behavior documented above.
+
+## Robust 1D estimators
+
+See [ROBUST_METHODS.md](ROBUST_METHODS.md) for Sigma-clipping, Percentile filtering, comparison controls, uncertainty limitations, and verification.
+

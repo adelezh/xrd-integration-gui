@@ -1,3 +1,4 @@
+import numpy as np
 """Plot presentation only; integration and exported arrays are untouched."""
 import json
 from pathlib import Path
@@ -72,13 +73,18 @@ class PlotMixin:
     def draw_curves(self):
         self.curve_ax.clear();self.curve_ax.set_axis_on()
         labels=curve_labels(self.curves)
-        for c,label in zip(self.curves,labels):self.curve_ax.plot(c.x,c.intensity,label=label,linewidth=1)
+        if len({c.metadata.get('source') for c in self.curves})==1:
+            from .presentation import method_label
+            labels=[method_label(c.metadata['settings'])+' | '+('Sector' if c.metadata.get('selection')=='sector' else 'Full azimuth')+(' (ref)' if c.metadata.get('comparison') else '') for c in self.curves]
+        for c,label in zip(self.curves,labels):
+            y=np.array(c.intensity,dtype=float,copy=True);y[c.metadata.get('invalid_bins',[])]=np.nan
+            self.curve_ax.plot(c.x,y,label=label,linewidth=1,linestyle='--' if c.metadata.get('comparison') else '-')
         if self.curves:
             self.curve_ax.set_xlabel(UNIT_LABELS.get(self.curves[0].metadata['unit'],self.curves[0].metadata['unit']))
             # A compact legend; complete source paths remain in Details.
             import textwrap
             handles,_=self.curve_ax.get_legend_handles_labels()
-            self.curve_ax.legend(handles,['\n'.join(textwrap.wrap(label,38)) for label in labels],fontsize=7,loc='best',framealpha=.8)
+            self.curve_ax.legend(handles,['\n'.join(textwrap.wrap(label,65)) for label in labels],fontsize=7,loc='best',framealpha=.8)
         self.curve_ax.set_ylabel('Intensity');self.curve_ax.tick_params(labelsize=9);self.curve_ax.relim();self.curve_ax.autoscale();self.curve_nav.update();self.curve_canvas.draw_idle()
     def plot_details(self,kind):
         if kind=='detector':text=self.active or 'No active detector image.'

@@ -1,4 +1,4 @@
-﻿from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
 import math
@@ -18,6 +18,14 @@ class Settings:
     variance: str = ''
     compare_full: bool = False
 
+    method_1d: str = 'average'
+    sigma_threshold: float = 5.0
+    sigma_iterations: int = 5
+    clipping_model: str = 'azimuthal'
+    percentile_low: float = 25.0
+    percentile_high: float = 75.0
+    compare_average: bool = False
+
     def validate(self):
         if self.unit not in ('2th_deg', 'q_A^-1'): raise ValueError('Choose 2theta or q units.')
         if not 1 <= self.radial_bins <= 100000 or not 1 <= self.azimuth_bins <= 10000:
@@ -31,7 +39,31 @@ class Settings:
             raise ValueError('Sector angles must be different, within -180 to 180 degrees.')
         if self.error_model not in ('none','poisson','supplied'): raise ValueError('Unsupported uncertainty model.')
         if self.error_model == 'supplied' and not self.variance: raise ValueError('Choose a variance image (variance, not sigma).')
+        if self.method_1d not in ('average','sigma_clip','percentile'):
+            raise ValueError('Choose Average, Sigma-clipping, or Percentile filtering.')
+        if self.method_1d == 'sigma_clip':
+            if not math.isfinite(self.sigma_threshold) or self.sigma_threshold <= 0:
+                raise ValueError('Sigma threshold must be positive and finite.')
+            if isinstance(self.sigma_iterations,bool) or not isinstance(self.sigma_iterations,int) or self.sigma_iterations < 1:
+                raise ValueError('Maximum iterations must be a positive integer.')
+            if self.clipping_model not in ('azimuthal','poisson','supplied'):
+                raise ValueError('Choose azimuthal, Poisson, or supplied variance for clipping.')
+            if self.clipping_model == 'supplied' and not self.variance:
+                raise ValueError('Supplied-variance clipping requires a variance image.')
+        if self.method_1d == 'percentile':
+            if not all(math.isfinite(x) for x in (self.percentile_low,self.percentile_high)) or not 0 <= self.percentile_low <= self.percentile_high <= 100:
+                raise ValueError('Percentiles must be finite, with 0 <= lower <= upper <= 100 (installed Cython API).')
         return self
+
+    @property
+    def percentile_argument(self):
+        return self.percentile_low if self.percentile_low == self.percentile_high else (self.percentile_low,self.percentile_high)
+
+    def validate_xye(self):
+        if self.method_1d == 'percentile' and self.percentile_low == self.percentile_high:
+            raise ValueError('Median/single-quantile XYE is unavailable: pyFAI returns selected-pixel propagation, not a characterized quantile uncertainty. Choose XY or CHI.')
+        if self.method_1d != 'sigma_clip' and self.error_model == 'none':
+            raise ValueError('XYE needs a supported uncertainty model. Choose Poisson/supplied variance or export XY/CHI.')
 
 class Preferences:
     def __init__(self, path=None):
@@ -45,3 +77,32 @@ class Preferences:
         if key == 'workspace':
             self.data['recent'] = list(dict.fromkeys([str(path)] + self.data.get('recent', [])))[:10]
         self.save()
+
+
+METHOD_DEFAULTS = {k:asdict(Settings())[k] for k in (
+    'method_1d','sigma_threshold','sigma_iterations','clipping_model',
+    'percentile_low','percentile_high','compare_average')}
+
+def restore_method_preferences(data):
+    """Old or malformed preferences cannot prevent startup."""
+    raw=data.get('integration_methods',{})
+    if not isinstance(raw,dict):raw={}
+    values=dict(METHOD_DEFAULTS)
+    for key,value in raw.items():
+        if key not in values:continue
+        try:
+            if key in ('sigma_threshold','percentile_low','percentile_high'):value=float(value)
+            if key=='sigma_iterations':
+                number=float(value)
+                if not number.is_integer():continue
+                value=int(number)
+            if key=='compare_average' and not isinstance(value,bool):continue
+            values[key]=value
+        except (TypeError,ValueError,OverflowError):pass
+    if values['method_1d'] not in ('average','sigma_clip','percentile'):values['method_1d']='average'
+    if values['clipping_model'] not in ('azimuthal','poisson','supplied'):values['clipping_model']='azimuthal'
+    if not math.isfinite(values['sigma_threshold']) or values['sigma_threshold']<=0:values['sigma_threshold']=5.
+    if values['sigma_iterations']<1:values['sigma_iterations']=5
+    if not all(math.isfinite(values[k]) for k in ('percentile_low','percentile_high')) or not 0<=values['percentile_low']<=values['percentile_high']<=100:
+        values['percentile_low'],values['percentile_high']=25.,75.
+    return values

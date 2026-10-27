@@ -16,6 +16,12 @@ def short_source(path):
     if stamp=='Unrecognized': return sample if len(sample)<=36 else sample[:33]+'…'
     return f'{sample} · Frame {frame}'
 
+def method_label(s):
+    method=s.get('method_1d','average')
+    if method=='sigma_clip':return f"Sigma-clipping {s.get('sigma_threshold',5):g} sigma"
+    if method=='percentile':return f"Percentile {s.get('percentile_low',25):g}-{s.get('percentile_high',75):g}"
+    return 'Average'
+
 def curve_labels(curves):
     sources=list(dict.fromkeys(c.metadata.get('source','') for c in curves))
     counts=Counter(short_source(p) for p in sources)
@@ -27,6 +33,7 @@ def curve_labels(curves):
             if stamp=='Unrecognized' or sum(file_fields(q)==file_fields(p) for q in sources)>1: label+=f' · #{sources.index(p)+1}'
         s=c.metadata.get('settings',{}); selection=c.metadata.get('selection','full')
         label+=' · '+(f"Sector {s.get('start','?'):g}°–{s.get('end','?'):g}°" if selection=='sector' and isinstance(s.get('start'),(float,int)) else 'Full azimuth')
+        label+=' | '+method_label(s)+(' (reference)' if c.metadata.get('comparison') else '')
         labels.append(label)
     return labels
 

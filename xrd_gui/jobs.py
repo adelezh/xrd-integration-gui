@@ -2,11 +2,11 @@ from pathlib import Path
 from dataclasses import replace, asdict
 import shutil
 import numpy as np
-from .naming import output_name, check_collisions, group_files
+from .naming import output_name, check_collisions, group_files, add_method_tag
 from .files import read_image, read_curve, combine_curves, scale_curve, write_curve, write_map, resolve_output, atomic_write
 
 
-def batch_plan(files, folder, units, one, two, extension, naming):
+def batch_plan(files, folder, units, one, two, extension, naming, settings=None):
     if not files or not units or not (one or two): raise ValueError('Select input files, at least one unit and output product.')
     if not folder: raise ValueError('Choose an output folder.')
     plan = []
@@ -14,6 +14,7 @@ def batch_plan(files, folder, units, one, two, extension, naming):
         for unit in units:
             for dim,ext in [('1D',extension)]*bool(one) + [('2D','.npz')]*bool(two):
                 name = output_name(source,naming,unit='tth' if unit=='2th_deg' else 'q',extension=ext,dimension='2d' if dim=='2D' else '')
+                if dim=='1D' and settings is not None:name=add_method_tag(name,settings)
                 plan.append((str(source),unit,dim,Path(folder)/name))
     check_collisions([p[3] for p in plan]); return plan
 
@@ -27,12 +28,14 @@ def run_batch(engine, settings, plan, policy, cancel, report):
             target = resolve_output(path,policy)
             if target is None: counts['skipped'] += 1; report(index+1,len(plan),f'Skipped: {path.name}'); continue
             if target.resolve() == Path(source).resolve(): raise ValueError('Output would overwrite an input.')
-            s = replace(settings,unit=unit,compare_full=False)
+            s = replace(settings,unit=unit,compare_full=False,compare_average=False)
+            if dim=='1D' and path.suffix.lower()=='.xye':s.validate_xye()
             curves,map_result,meta = engine.integrate(read_image(source),s,source,dim=='1D',dim=='2D')
             if cancel.is_set(): break
-            if dim=='1D': write_curve(target,curves[0],overwrite=policy=='Overwrite')
+            omitted=0
+            if dim=='1D': omitted=write_curve(target,curves[0],overwrite=policy=='Overwrite')
             else: write_map(target,map_result,meta,overwrite=policy=='Overwrite')
-            counts['saved'] += 1; report(index+1,len(plan),f'Saved: {target.name}')
+            counts['saved'] += 1; report(index+1,len(plan),f'Saved: {target.name}'+(f' ({omitted} undefined bins omitted)' if omitted else ''))
         except Exception as e:
             counts['failed'] += 1; report(index+1,len(plan),f'Failed {Path(source).name}: {e}')
     return dict(counts,cancelled=cancel.is_set())
@@ -88,7 +91,7 @@ def run_manipulation(plan,operation,policy,scale,approximate,cancel,report):
             else:
                 c = combine_curves([read_curve(p) for p in members],operation=='Average')
                 write_curve(target,c,overwrite=overwrite)
-            counts['saved']+=1; report(i+1,len(plan),f'Saved: {target.name}')
+            counts['saved']+=1; report(i+1,len(plan),f'Saved: {target.name}'+(f' ({omitted} undefined bins omitted)' if omitted else ''))
         except Exception as e:
             counts['failed']+=1; report(i+1,len(plan),f'Failed {path.name}: {e}')
     return dict(counts,cancelled=cancel.is_set())

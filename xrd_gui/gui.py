@@ -13,13 +13,14 @@ from .files import read_image, write_curve, write_map, atomic_write
 from .processing import Engine, sector_pixels
 from .jobs import batch_plan, run_batch, manipulation_plan, run_manipulation
 
+from .ui_methods import MethodsMixin
 from .ui_layout import LayoutMixin
 from .ui_plots import PlotMixin
 from .ui_jobs import JobsMixin
 from .presentation import short_source, curve_labels
 
 
-class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
+class App(MethodsMixin, LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
     def __init__(self, preferences=None):
         if os.name == 'nt':
             try:
@@ -30,7 +31,7 @@ class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
         width=min(1500,self.winfo_screenwidth()-80); height=min(950,self.winfo_screenheight()-100)
         self.geometry(f'{width}x{height}+20+20'); self.minsize(900,600)
         self.prefs = preferences or Preferences(); self.engine = None; self.files = []; self.visible = []; self.active = None; self.image_data = None
-        self.curves = []; self.map_result = None; self.map_meta = {}; self.revision = 0; self.busy = False; self.events = queue.Queue(); self.cancel = threading.Event()
+        self.curves = []; self.map_result = None; self.map_meta = {}; self.revision = 0; self.revision_1d=0; self.revision_2d=0; self.curve_revision=-1; self.map_revision=-1; self.busy = False; self.events = queue.Queue(); self.cancel = threading.Event()
         self.status = tk.StringVar(value='Load a calibration and TIFF files.'); self.loaded = tk.StringVar(value='No calibration loaded')
         self.workspace = tk.StringVar(value=self.prefs.data.get('workspace',str(Path.cwd()))); self.poni = tk.StringVar(); self.mask = tk.StringVar(); self.mask_enabled = tk.BooleanVar(value=True)
         self.shared_controls()
@@ -62,7 +63,7 @@ class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
         else: self.log.pack(side='bottom',fill='x',before=self.tabs)
     def close(self):
         self.cancel.set()
-        try:self.save_panel_sizes()
+        try:self.persist_methods(); self.save_panel_sizes()
         except OSError:pass
         self.destroy()
     def initialdir(self,key): return self.prefs.data.get(key,self.workspace.get())
@@ -106,21 +107,25 @@ class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
         if self.active: command.append(self.active)
         subprocess.Popen(command,cwd=self.workspace.get(),env=env,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         self.status.set('Calibration launched separately. Load/Reload saved .poni and mask changes explicitly.')
-    def dirty(self,*_):
+    def dirty(self,*_,one=True,two=True):
         self.revision += 1
+        if one:self.revision_1d+=1
+        if two:self.revision_2d+=1
         if hasattr(self,'settings_summary'):
             from .presentation import UNIT_LABELS
             self.settings_summary.set(f"{UNIT_LABELS.get(self.svars['unit'].get(),self.svars['unit'].get())} | {self.svars['radial_bins'].get()} bins | "+('Sector' if self.sector.get() else 'Full azimuth'))
+        if hasattr(self,'method_vars') and hasattr(self,'settings_summary'):
+            self.settings_summary.set(self.settings_summary.get()+' | '+self.method_display.get())
         if self.curves or self.map_result is not None:
             self.status.set('Results need updating - Run to update. Saved results retain their original settings.')
-            if hasattr(self,'result_status'):self.result_status.set('Results need updating')
+            self.refresh_result_status()
     def browse_variance(self):
         p=self.choose('variance')
         if p:self.svars['variance'].set(p)
-    def settings(self):
+    def settings(self,one=True):
         v={k:x.get() for k,x in self.svars.items()}; radial=None
         if v['minimum'] or v['maximum']: radial=(float(v['minimum']),float(v['maximum']))
-        return Settings(unit=v['unit'],radial_bins=int(v['radial_bins']),azimuth_bins=int(v['azimuth_bins']),radial_range=radial,sector=self.sector.get(),start=float(v['start']),end=float(v['end']),solid_angle=self.solid.get(),polarization=float(v['polarization']),error_model=v['error_model'],variance=v['variance'],compare_full=self.compare.get()).validate()
+        return Settings(unit=v['unit'],radial_bins=int(v['radial_bins']),azimuth_bins=int(v['azimuth_bins']),radial_range=radial,sector=self.sector.get(),start=float(v['start']),end=float(v['end']),solid_angle=self.solid.get(),polarization=float(v['polarization']),error_model=v['error_model'],variance=v['variance'],compare_full=self.compare.get(),**self.method_options(one)).validate()
     def add_files(self):
         p=self.choose(multiple=True,types=[('TIFF images','*.tif *.tiff')])
         if p:self.files=sorted(set(self.files+list(p)),key=natural_key); self.refresh_files()
@@ -155,9 +160,9 @@ class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
         if not self.engine:raise ValueError('Load a valid calibration first.')
         return copy.deepcopy(self.engine)
     def run_integration(self,one,two):
-        settings=self.settings(); engine=self.require_engine(); engine.freeze_variance(settings); sources=self.selected_files()
+        settings=self.settings(one); self.persist_methods(); engine=self.require_engine(); engine.freeze_variance(settings); sources=self.selected_files()
         if not sources:raise ValueError('Select one or more TIFF files.')
-        active=self.active if self.active in sources else sources[0]; revision=self.revision
+        active=self.active if self.active in sources else sources[0]; revision=self.revision; rev1=self.revision_1d; rev2=self.revision_2d
         def work():
             curves=[]; result=None; metadata={}
             for i,source in enumerate(sources):
@@ -168,8 +173,12 @@ class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
             return curves,result,metadata
         def done(payload):
             curves,result,meta=payload
-            if one:self.curves=curves; self.draw_curves()
-            if two:self.map_result=result; self.map_meta=meta; self.draw_map()
+            if one:self.curves=curves; self.curve_revision=rev1; self.draw_curves()
+            for c in curves:
+                missing=len(c.metadata.get("invalid_bins",[]))
+                if missing:self.log.insert("end",f"{missing} empty/insufficient bins in {c.metadata.get('method_1d')} curve; reduce bins or restrict range.\n")
+            if two:self.map_result=result; self.map_meta=meta; self.map_revision=rev2; self.draw_map()
+            self.refresh_result_status()
             self.status.set('Cancelled; completed results retained.' if self.cancel.is_set() else ('Results need updating — inputs/settings changed during processing.' if revision!=self.revision else 'Integration complete. Results are not saved automatically.'))
         self.start_worker(work,done)
     def save_dialog(self,two):
@@ -181,19 +190,27 @@ class App(LayoutMixin, PlotMixin, JobsMixin, tk.Tk):
             ttk.Combobox(win,textvariable=choice,values=[f'{i}: {label}' for i,label in enumerate(curve_labels(self.curves))],width=80,state='readonly').pack()
         ttk.Combobox(win,textvariable=fmt,values=['npz'] if two else ['xy','chi','xye'],state='readonly').pack()
         def save(plot=False):
-            ext='.png' if plot else '.'+fmt.get(); p=filedialog.asksaveasfilename(parent=win,initialdir=self.initialdir('output'),defaultextension=ext,filetypes=[('Output','*'+ext)])
+            ext='.png' if plot else '.'+fmt.get()
+            from .naming import output_name, add_method_tag
+            meta=self.map_meta if two else self.curves[int(choice.get().split(':')[0])].metadata
+            saved_settings=Settings(**meta['settings'])
+            name=output_name(meta.get('source','result'),unit='tth' if saved_settings.unit=='2th_deg' else 'q',extension=ext)
+            if not two:name=add_method_tag(name,saved_settings)
+            p=filedialog.asksaveasfilename(parent=win,initialdir=self.initialdir('output'),initialfile=name,defaultextension=ext,filetypes=[('Output','*'+ext)])
             if not p:return
             if Path(p).exists() or Path(p+'.json').exists():raise ValueError('Choose a new filename to preserve existing output.')
+            omitted=0
             if plot:atomic_write(p,lambda q:(self.map_ax if two else self.curve_ax).figure.savefig(q,dpi=180))
             elif two:write_map(p,self.map_result,self.map_meta)
-            else:write_curve(p,self.curves[int(choice.get().split(':')[0])])
-            self.prefs.remember('output',str(Path(p).parent)); self.status.set('Saved '+p); win.destroy()
+            else:omitted=write_curve(p,self.curves[int(choice.get().split(':')[0])])
+            self.prefs.remember('output',str(Path(p).parent)); self.status.set('Saved '+p+(f' ({omitted} undefined bins omitted; see JSON metadata)' if omitted else '')); win.destroy()
         row=ttk.Frame(win); row.pack(); self.button(row,'Save numerical data',save); self.button(row,'Export plot PNG',lambda:save(True))
     def job_folder(self,var):
         p=self.choose('output',folder=True)
         if p:var.set(p)
     def get_batch_plan(self):
-        return batch_plan(self.batch_files,self.bvars['folder'].get(),(['2th_deg'] if self.btth.get() else [])+(['q_A^-1'] if self.bq.get() else []),self.bone.get(),self.btwo.get(),self.bvars['extension'].get(),self.bvars['naming'].get())
+        if self.batch_settings and self.bone.get() and self.bvars['extension'].get()=='.xye':self.batch_settings.validate_xye()
+        return batch_plan(self.batch_files,self.bvars['folder'].get(),(['2th_deg'] if self.btth.get() else [])+(['q_A^-1'] if self.bq.get() else []),self.bone.get(),self.btwo.get(),self.bvars['extension'].get(),self.bvars['naming'].get(),settings=self.batch_settings)
     def start_batch(self):
         if self.batch_settings is None:raise ValueError('Click Use current diagnostic settings first.')
         settings=self.batch_settings; engine=self.require_engine(); engine.freeze_variance(settings); plan=self.get_batch_plan(); self.preview_batch(); policy=self.bvars['policy'].get()
